@@ -50,7 +50,8 @@ lazy val core: Project = (project in file("core"))
       scalaTest
     ),
     // Check IO usage in core
-    useRequireIOPlugin
+    useRequireIOPlugin,
+    scalacOptions ++= Seq("-Ydebug")
   )
 
 lazy val plugin: Project = (project in file("plugin"))

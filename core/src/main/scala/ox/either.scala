@@ -1,6 +1,6 @@
 package ox
 
-import scala.annotation.implicitNotFound
+import scala.annotation.{implicitNotFound, targetName}
 import scala.compiletime.{error, summonFrom}
 import scala.util.{NotGiven, boundary}
 import scala.util.boundary.{Label, break}
@@ -55,6 +55,9 @@ object either:
         case _ => error("`.ok()` can only be used within an `either` call.\nIs it present?")
       }
 
+    @targetName("question_mark")
+    transparent inline def ? : A = ${ EitherMacros.questionMarkMacro[E, A]('t) }
+
   extension [A](inline t: Option[A])
     /** Unwrap the value of the `Option`, short-circuiting the computation to the enclosing [[either]], in case this is a `None`. */
     transparent inline def ok(): A =
@@ -91,3 +94,54 @@ object either:
 inline def catching[T](inline t: => T): Either[Throwable, T] =
   try Right(t)
   catch case NonFatal(e) => Left(e)
+
+private[ox] object EitherMacros:
+  import scala.quoted.*
+
+  def questionMarkMacro[E: Type, A: Type](either: Expr[Either[E, A]])(using Quotes): Expr[A] =
+    import quotes.reflect.*
+
+    def traverseContext(symbol: Symbol): Boolean = {
+      import quotes.reflect._
+
+      var currentSymbol: Symbol = symbol
+      var foundEither: Boolean = false
+      var invalidContext: Boolean = false
+
+      while (currentSymbol != Symbol.noSymbol && !foundEither && !invalidContext) {
+        // Access minimal information about the symbol
+        val currentName = currentSymbol.name
+        val isMethod = currentSymbol.flags.is(Flags.Method)
+
+        if (isMethod) {
+          if (currentName == "either") {
+            foundEither = true
+          } else if (currentName == "fork") {
+            invalidContext = true
+          }
+        }
+        currentSymbol = currentSymbol.maybeOwner
+      }
+
+      foundEither && !invalidContext
+    }
+
+    if !traverseContext(Symbol.spliceOwner) then
+      report.errorAndAbort("The `?` operator can only be used directly within an `either` block and not within `fork`.", either)
+    else
+      Expr.summon[boundary.Label[Either[E, Nothing]]] match
+        case Some(labelExpr) =>
+          '{
+            $either match
+              case Left(e)  => break(Left(e))(using $labelExpr)
+              case Right(a) => a
+          }
+        case None =>
+          Expr.summon[boundary.Label[Either[Nothing, Nothing]]] match
+            case Some(_) =>
+              report.errorAndAbort(
+                "The enclosing `either` call uses a different error type.\nIf it's explicitly typed, is the error type correct?"
+              )
+
+            case None =>
+              report.errorAndAbort("`.ok()` can only be used within an `either` call.\nIs it present?")
