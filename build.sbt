@@ -77,6 +77,9 @@ lazy val core = (projectMatrix in file("core"))
     scalaVersions = Seq(scala3),
     settings = Seq(
       Test / fork := false,
+      // One native test process, so a CI hang leaves a single suite at the end of the log.
+      Test / parallelExecution := false,
+      Test / logBuffered := false,
       nativeConfig ~= { _.withMultithreading(true) }
     )
   )
