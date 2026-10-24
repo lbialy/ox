@@ -346,6 +346,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
       selectClause: SelectClause[?] | Null,
       suspend: Boolean
   ): AnyRef =
+    var spins = 0
     while true do
       val state = segment.getCell(i)
       if state == null || (state eq IN_BUFFER) then
@@ -389,7 +390,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
           case cs: CellState =>
             cs match
               case CellState.INTERRUPTED_SEND => return ReceiveResult.FAILED
-              case CellState.RESUMING         => Thread.onSpinWait()
+              case CellState.RESUMING         => spins = Backoff(spins)
               case CellState.CLOSED           => return ReceiveResult.CLOSED
               case _                          => throw new IllegalStateException(s"Unexpected state: $state in channel: $this")
           case _ =>
@@ -444,6 +445,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
   end expandBuffer
 
   private def updateCellExpandBuffer(segment: Segment, i: Int): ExpandBufferResult =
+    var spins = 0
     while true do
       val state = segment.getCell(i)
       if state == null then
@@ -470,7 +472,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
               case CellState.INTERRUPTED_SEND    => return ExpandBufferResult.FAILED
               case CellState.INTERRUPTED_RECEIVE => return ExpandBufferResult.DONE
               case CellState.BROKEN              => return ExpandBufferResult.DONE
-              case CellState.RESUMING            => Thread.onSpinWait()
+              case CellState.RESUMING            => spins = Backoff(spins)
               case CellState.CLOSED              => return ExpandBufferResult.CLOSED
               case _                             => throw new IllegalStateException(s"Unexpected state: $state in channel: $this")
           case _ =>
@@ -547,6 +549,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
   end closeCellsUntil
 
   private def updateCellClose(segment: Segment, i: Int): Unit =
+    var spins = 0
     while true do
       val state = segment.getCell(i)
       if state == null || (state eq IN_BUFFER) then
@@ -560,15 +563,15 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
               segment.setCell(i, CLOSED)
               segment.cellInterruptedReceiver()
               return
-            else Thread.onSpinWait()
+            else spins = Backoff(spins)
           case ss: StoredSelectClause =>
             if ss.select.channelClosed(closedReason.get().nn) then return
-            else Thread.onSpinWait()
+            else spins = Backoff(spins)
           case cs: CellState =>
             cs match
               case CellState.DONE | CellState.BROKEN                          => return
               case CellState.INTERRUPTED_RECEIVE | CellState.INTERRUPTED_SEND => return
-              case CellState.RESUMING                                         => Thread.onSpinWait()
+              case CellState.RESUMING                                         => spins = Backoff(spins)
               case _ => throw new IllegalStateException(s"Unexpected state: $state in channel: $this")
           case _ =>
             // buffered value: discarding
@@ -619,9 +622,10 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
   end hasValuesToReceive
 
   private def hasValueToReceive(segment: Segment, i: Int): Boolean =
+    var spins = 0
     while true do
       val state = segment.getCell(i)
-      if state == null || (state eq IN_BUFFER) then Thread.onSpinWait()
+      if state == null || (state eq IN_BUFFER) then spins = Backoff(spins)
       else
         state match
           case c: Continuation        => return c.isSender
@@ -629,7 +633,7 @@ final class Channel[T] private (val capacity: Int) extends Source[T] with Sink[T
           case cs: CellState          =>
             cs match
               case CellState.INTERRUPTED_SEND | CellState.INTERRUPTED_RECEIVE => return false
-              case CellState.RESUMING                                         => Thread.onSpinWait()
+              case CellState.RESUMING                                         => spins = Backoff(spins)
               case CellState.CLOSED                                           => return false
               case CellState.DONE | CellState.BROKEN                          => return false
               case _ => throw new IllegalStateException(s"Unexpected state: $state in channel: $this")
