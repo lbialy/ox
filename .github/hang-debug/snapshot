@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# snapshot <pid> [outdir]
+# Capture the state of a (possibly hung) process before anyone kills it.
+# Order: non-intrusive first (/proc, CPU sample, top), then ptrace-based
+# (strace, perf, gdb, gcore). After ptrace we check whether the process got
+# unstuck: a hang that resolves on attach is itself evidence (EINTR wakes a
+# lost-wakeup / timed-wait victim).
+# Prints the dump directory on stdout (last line). Never kills the process.
+set -uo pipefail
+
+pid=${1:?usage: snapshot <pid> [outdir]}
+[[ -d /proc/$pid ]] || { echo "snapshot: pid $pid not running" >&2; exit 1; }
+out=${2:-$HOME/dumps/$(date -u +%Y-%m-%dT%H-%M-%S)-$pid}
+mkdir -p "$out"
+log() { echo "[snapshot $(date -u +%T)] $*" >&2; }
+alive() { [[ -d /proc/$pid ]]; }
+# utime+stime in clock ticks summed over all tasks
+cpu_ticks() { awk '{print $14+$15}' /proc/$pid/stat 2>/dev/null || echo 0; }
+hz=$(getconf CLK_TCK)
+
+log "pid $pid -> $out"
+
+# 1. Static process info
+{
+  echo "pid: $pid"
+  echo "time: $(date -u +%FT%TZ)"
+  echo "exe: $(readlink /proc/$pid/exe)"
+  echo "cmdline: $(tr '\0' ' ' < /proc/$pid/cmdline)"
+  echo "cwd: $(readlink /proc/$pid/cwd)"
+  echo "nproc(host): $(nproc)  online: $(cat /sys/devices/system/cpu/online)"
+  echo "affinity: $(taskset -pc $pid 2>&1)"
+  echo "cgroup: $(cat /proc/$pid/cgroup)"
+  echo "loadavg: $(cat /proc/loadavg)"
+  echo "--- ancestry"
+  p=$pid; while [[ $p -gt 1 ]]; do ps -o pid=,ppid=,etime=,args= -p $p | cut -c1-300; p=$(ps -o ppid= -p $p | tr -d ' '); done
+} > "$out/info.txt" 2>&1
+cp /proc/$pid/status "$out/status.txt" 2>/dev/null
+cp /proc/$pid/maps "$out/maps.txt" 2>/dev/null
+ls -l /proc/$pid/fd > "$out/fds.txt" 2>&1
+# pipe fill levels matter for H6: record what the fds point at
+for fd in /proc/$pid/fd/*; do echo "$(basename $fd) -> $(readlink $fd) | $(grep -h '^pos\|^flags' /proc/$pid/fdinfo/$(basename $fd) 2>/dev/null | tr '\n' ' ')"; done > "$out/fdinfo.txt" 2>&1
+
+# 2. Per-task state, wchan, syscall, kernel stack
+{
+  printf "%-8s %-5s %-24s %-10s %-10s %s\n" tid state wchan utime stime syscall
+  for t in /proc/$pid/task/*; do
+    tid=${t##*/}
+    read -r -a s < <(sed 's/^.*) //' "$t/stat" 2>/dev/null)
+    printf "%-8s %-5s %-24s %-10s %-10s %s\n" "$tid" "${s[0]:-?}" "$(cat $t/wchan 2>/dev/null)" "${s[11]:-?}" "${s[12]:-?}" "$(cat $t/syscall 2>/dev/null | cut -d' ' -f1-3)"
+  done
+} > "$out/tasks.txt" 2>&1
+for t in /proc/$pid/task/*; do echo "== ${t##*/} $(cat $t/comm)"; sudo -n cat "$t/stack" 2>/dev/null; done > "$out/kstacks.txt"
+
+# 3. CPU over a 2 s window (process total and per thread via top)
+c0=$(cpu_ticks); sleep 2; c1=$(cpu_ticks)
+cpu_pct=$(( (c1 - c0) * 100 / (2 * hz) ))
+echo "$cpu_pct" > "$out/cpu_pct"
+top -H -b -n1 -d1 -p $pid > "$out/top.txt" 2>&1
+log "cpu ${cpu_pct}% over 2s, $(ls /proc/$pid/task | wc -l) threads"
+
+# 4. strace 5 s (ptrace attach #1)
+if alive; then
+  timeout -s INT 5 strace -f -tt -T -p $pid -o "$out/strace.txt" 2>"$out/strace.err"
+fi
+
+# 5. perf 10 s when the process is burning CPU (H3)
+if alive && (( cpu_pct > 50 )); then
+  log "cpu > 50%: perf record 10s"
+  perf record -g -o "$out/perf.data" -p $pid -- sleep 10 > "$out/perf.err" 2>&1
+  perf report -i "$out/perf.data" --stdio --no-children 2>/dev/null | head -200 > "$out/perf.txt"
+fi
+
+# 6. gdb all-thread backtraces (ptrace attach #2)
+if alive; then
+  timeout 120 gdb -batch -nx -p $pid \
+    -ex 'set debuginfod enabled off' -ex 'set pagination off' -ex 'set print thread-events off' \
+    -ex 'info threads' -ex 'thread apply all bt 64' > "$out/gdb-bt.txt" 2>&1
+fi
+
+# 7. core (largest, last)
+if alive; then
+  timeout 300 gcore -o "$out/core" $pid > "$out/gcore.log" 2>&1
+  # binary for symbols, unless it is huge or already saved
+  exe=$(readlink /proc/$pid/exe); [[ -f $exe ]] && cp "$exe" "$out/" 2>/dev/null
+fi
+
+# 8. Did the attaches unstick it? Sample again.
+sleep 3
+if alive; then
+  c2=$(cpu_ticks); sleep 2; c3=$(cpu_ticks)
+  echo "post_snapshot: alive cpu_pct=$(( (c3 - c2) * 100 / (2 * hz) ))" >> "$out/info.txt"
+else
+  echo "post_snapshot: EXITED during snapshot (attach may have unstuck it)" >> "$out/info.txt"
+  touch "$out/EXITED_DURING_SNAPSHOT"
+fi
+log "done"
+echo "$out"
