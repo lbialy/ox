@@ -48,7 +48,7 @@ done
 wait $pid; rc=$?
 [[ -z $outcome ]] && { (( rc == 0 )) && outcome=pass || outcome=fail; }
 secs=$(( $(date +%s) - t0 ))
-last=$(grep -v '^\s*$' "$log" | tail -1 | cut -c1-300)
+last=$(sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$log" | grep -v '^\s*$' | tail -1 | cut -c1-300)
 jq -n --arg outcome "$outcome" --argjson exit "$rc" --argjson seconds "$secs" --arg reason "$reason" \
   --arg cpu "$cpu" --arg last "$last" --arg nproc "$(nproc)" --arg cpus "${CPUS:-all}" \
   '{outcome:$outcome, exit:$exit, seconds:$seconds, hang_reason:$reason, hang_cpu_pct:$cpu, last_line:$last, nproc_runner:$nproc, cpus:$cpus}' \

@@ -54,7 +54,7 @@ jobs:
           s=""
           [ -n "${GC:-}" ] && s="$s.withGC(scala.scalanative.build.GC.$GC)"
           [ -n "${NATIVE_MODE:-}" ] && s="$s.withMode(scala.scalanative.build.Mode.$NATIVE_MODE)"
-          [ -n "$s" ] && echo "SBT_SET=set coreNative3/nativeConfig ~= (_$s)" >> "$GITHUB_ENV" || true
+          [ -n "$s" ] && echo "SBT_SET=set LocalProject(\"coreNative3\") / nativeConfig ~= (_$s)" >> "$GITHUB_ENV" || true
       - name: Compile
         # Same as ci.yml. In native-only mode, also link the test binary here so it is not timed.
         run: |

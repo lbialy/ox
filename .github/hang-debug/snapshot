@@ -40,6 +40,12 @@ ls -l /proc/$pid/fd > "$out/fds.txt" 2>&1
 # pipe fill levels matter for H6: record what the fds point at
 for fd in /proc/$pid/fd/*; do echo "$(basename $fd) -> $(readlink $fd) | $(grep -h '^pos\|^flags' /proc/$pid/fdinfo/$(basename $fd) 2>/dev/null | tr '\n' ' ')"; done > "$out/fdinfo.txt" 2>&1
 
+# 1b. JVM: thread dump including virtual threads (jstack/Thread.print omits VTs)
+if [[ $(cat /proc/$pid/comm) == java ]]; then
+  timeout 60 jcmd $pid Thread.dump_to_file -format=text "$out/jvm-threads.txt" > /dev/null 2>&1
+  timeout 60 jcmd $pid Thread.print > "$out/jvm-jstack.txt" 2>&1
+fi
+
 # 2. Per-task state, wchan, syscall, kernel stack
 {
   printf "%-8s %-5s %-24s %-10s %-10s %s\n" tid state wchan utime stime syscall
