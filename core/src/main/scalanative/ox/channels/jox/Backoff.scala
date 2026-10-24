@@ -12,5 +12,10 @@ private[jox] object Backoff:
   private final val SpinLimit = 64
 
   def apply(spins: Int): Int =
-    if spins < SpinLimit then Thread.onSpinWait() else LockSupport.parkNanos(10_000)
+    if spins < SpinLimit then Thread.onSpinWait()
+    else
+      // parkNanos returns at once while the interrupt flag is set, which would turn this back into a spin; park with the flag clear
+      val interrupted = Thread.interrupted()
+      LockSupport.parkNanos(10_000)
+      if interrupted then Thread.currentThread().interrupt()
     spins + 1
